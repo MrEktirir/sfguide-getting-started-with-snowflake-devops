@@ -1,6 +1,3 @@
-# Views to transform marketplace data in pipeline
-
-import os
 
 from snowflake.core import Root, CreateMode
 from snowflake.snowpark import Session
@@ -13,24 +10,20 @@ from snowflake.core.user_defined_function import (
 from snowflake.core.view import View, ViewColumn
 
 
-"""
-To join the flight and location focused tables 
-we need to cross the gap between the airport and cities domains. 
-For this we make use of a Snowpark Python UDF. 
-What's really cool is that Snowpark allows us to define a vectorized UDF 
-making the processing super efficient as we don’t have to invoke the 
-function on each row individually!
+# ---------------------------------------------------------
+# 1. Airport IATA -> City mapping
+# ---------------------------------------------------------
 
-To compute the mapping between airports and cities, 
-we use SnowflakeFile to read a JSON list from the pyairports package. 
-The SnowflakeFile class provides dynamic file access, to stream files of any size.
-"""
 map_city_to_airport = UserDefinedFunction(
     name="get_city_for_airport",
-    arguments=[Argument(name="iata", datatype="VARCHAR")],
+    arguments=[
+        Argument(name="iata", datatype="VARCHAR")
+    ],
     return_type=ReturnDataType(datatype="VARCHAR"),
     language_config=PythonFunction(
-        runtime_version="3.11", packages=["snowflake-snowpark-python"], handler="main"
+        runtime_version="3.11",
+        packages=["snowflake-snowpark-python", "pandas"],
+        handler="main",
     ),
     body="""
 from snowflake.snowpark.files import SnowflakeFile
@@ -41,23 +34,36 @@ import json
 @vectorized(input=pandas.DataFrame)
 def main(df):
     airport_list = json.loads(
-        SnowflakeFile.open("@bronze.raw/airport_list.json", 'r', require_scoped_url = False).read()
+        SnowflakeFile.open(
+            "@QUICKSTART_COMMON.BRONZE.RAW/airport_list.json",
+            "r",
+            require_scoped_url=False
+        ).read()
     )
-    airports = {airport[3]: airport[1] for airport in airport_list}
-    return df[0].apply(lambda iata: airports.get(iata.upper()))
+
+    airports = {
+        airport[3]: airport[1]
+        for airport in airport_list
+    }
+
+    return df[0].apply(
+        lambda iata: (
+            airports.get(str(iata).upper())
+            if pandas.notna(iata)
+            else None
+        )
+    )
 """,
 )
 
 
-"""
-To mangle the data into a more usable form, 
-we make use of views to not materialize the marketplace data 
-and avoid the corresponding storage costs. 
-"""
+# ---------------------------------------------------------
+# 2. Data harmonization views
+# ---------------------------------------------------------
 
 pipeline = [
-    # We are interested in the per seat carbon emissions.
-    # To obtain these, we need to divide the emission data by the number of seats in the airplane.
+
+    # Flight CO2 emissions per passenger
     View(
         name="flight_emissions",
         columns=[
@@ -66,17 +72,24 @@ pipeline = [
             ViewColumn(name="co2_emissions_kg_per_person"),
         ],
         query="""
-        select 
-            departure_airport, 
-            arrival_airport, 
-            avg(estimated_co2_total_tonnes / seats) * 1000 as co2_emissions_kg_per_person
-        from oag_flight_emissions_data_sample.public.estimated_emissions_schedules_sample
-        where seats != 0 and estimated_co2_total_tonnes is not null
-        group by departure_airport, arrival_airport
+        SELECT
+            departure_airport,
+            arrival_airport,
+            AVG(
+                estimated_co2_total_tonnes / seats
+            ) * 1000 AS co2_emissions_kg_per_person
+        FROM
+            OAG_FLIGHT_EMISSIONS_DATA_SAMPLE.PUBLIC.ESTIMATED_EMISSIONS_SCHEDULES_SAMPLE
+        WHERE
+            seats != 0
+            AND estimated_co2_total_tonnes IS NOT NULL
+        GROUP BY
+            departure_airport,
+            arrival_airport
         """,
     ),
-    # To avoid unreliable flight connections, we compute the fraction of flights that arrive
-    # early or on time from the flight status data provided by OAG.
+
+    # Flight punctuality
     View(
         name="flight_punctuality",
         columns=[
@@ -85,20 +98,28 @@ pipeline = [
             ViewColumn(name="punctual_pct"),
         ],
         query="""
-        select 
-            departure_iata_airport_code, 
-            arrival_iata_airport_code, 
-            count(
-                case when arrival_actual_ingate_timeliness IN ('OnTime', 'Early') THEN 1 END
-            ) / COUNT(*) * 100 as punctual_pct
-        from oag_flight_status_data_sample.public.flight_status_latest_sample
-        where arrival_actual_ingate_timeliness is not null
-        group by departure_iata_airport_code, arrival_iata_airport_code
+        SELECT
+            departure_iata_airport_code,
+            arrival_iata_airport_code,
+            COUNT(
+                CASE
+                    WHEN arrival_actual_ingate_timeliness
+                        IN ('OnTime', 'Early')
+                    THEN 1
+                END
+            ) * 100.0 / NULLIF(COUNT(*), 0)
+                AS punctual_pct
+        FROM
+            OAG_FLIGHT_STATUS_DATA_SAMPLE.PUBLIC.FLIGHT_STATUS_LATEST_SAMPLE
+        WHERE
+            arrival_actual_ingate_timeliness IS NOT NULL
+        GROUP BY
+            departure_iata_airport_code,
+            arrival_iata_airport_code
         """,
     ),
-    # When joining the flight emissions with the punctuality view,
-    # we filter for flights starting from the airport closest to where we live.
-    # This information is provided in the tiny JSON file data/home.json which we query directly in the view.
+
+    # Flights departing from home airport
     View(
         name="flights_from_home",
         columns=[
@@ -109,49 +130,75 @@ pipeline = [
             ViewColumn(name="punctual_pct"),
         ],
         query="""
-        select 
-            departure_airport, 
-            arrival_airport, 
-            get_city_for_airport(arrival_airport) arrival_city,  
-            co2_emissions_kg_per_person, 
-            punctual_pct,
-        from flight_emissions
-        join flight_punctuality 
-            on departure_airport = departure_iata_airport_code 
-            and arrival_airport = arrival_iata_airport_code
-        where departure_airport = (
-            select $1:airport 
-            from @quickstart_common.public.quickstart_repo/branches/main/data/home.json 
-                (FILE_FORMAT => bronze.json_format))
+        SELECT
+            emissions.departure_airport,
+            emissions.arrival_airport,
+            QUICKSTART_PROD.SILVER.GET_CITY_FOR_AIRPORT(
+                emissions.arrival_airport
+            ) AS arrival_city,
+            emissions.co2_emissions_kg_per_person,
+            punctuality.punctual_pct
+        FROM
+            QUICKSTART_PROD.SILVER.FLIGHT_EMISSIONS emissions
+        JOIN
+            QUICKSTART_PROD.SILVER.FLIGHT_PUNCTUALITY punctuality
+            ON emissions.departure_airport =
+                punctuality.departure_iata_airport_code
+            AND emissions.arrival_airport =
+                punctuality.arrival_iata_airport_code
+        WHERE
+            emissions.departure_airport = (
+                SELECT $1:airport::VARCHAR
+                FROM
+                    @QUICKSTART_COMMON.PUBLIC.QUICKSTART_REPO/branches/main/data/home.json
+                    (
+                        FILE_FORMAT =>
+                            QUICKSTART_COMMON.BRONZE.JSON_FORMAT
+                    )
+            )
         """,
     ),
-    # Weather Source provides a weather forecast for the upcoming two weeks.
-    # As the free versions of the data sets we use do not cover the entire globe,
-    # we limit our pipeline to zip codes inside the US and compute the average
-    # temperature, humidity, precipitation probability and cloud coverage.
+
+    # Weather forecast: city-level mapping
     View(
         name="weather_forecast",
         columns=[
-            ViewColumn(name="postal_code"),
+            ViewColumn(name="geo_id"),
             ViewColumn(name="avg_temperature_air_f"),
-            ViewColumn(name="avg_relative_humidity_pct"),
-            ViewColumn(name="avg_cloud_cover_pct"),
-            ViewColumn(name="precipitation_probability_pct"),
+            ViewColumn(name="total_precipitation_in"),
         ],
         query="""
-        select 
-            postal_code, 
-            avg(avg_temperature_air_2m_f) avg_temperature_air_f, 
-            avg(avg_humidity_relative_2m_pct) avg_relative_humidity_pct, 
-            avg(avg_cloud_cover_tot_pct) avg_cloud_cover_pct, 
-            avg(probability_of_precipitation_pct) precipitation_probability_pct
-        from global_weather__climate_data_for_bi.standard_tile.forecast_day
-        where country = 'US'
-        group by postal_code
+        SELECT
+            CASE LOWER(city_name)
+                WHEN 'houston'
+                    THEN 'geoId/4835000'
+                WHEN 'los_angeles'
+                    THEN 'geoId/0644000'
+                WHEN 'new_york'
+                    THEN 'geoId/3651000'
+            END AS geo_id,
+            AVG(
+                avg_temperature_air_2m_f
+            ) AS avg_temperature_air_f,
+            SUM(
+                tot_precipitation_in
+            ) AS total_precipitation_in
+        FROM
+            GLOBAL_WEATHER_CLIMATE_DATA_BY_THE_WEATHER_NETWORK_FOR_BUSINESS
+                .PWS_BI_SAMPLE.POINT_FORECAST_DAY
+        WHERE
+            country_code = 'US'
+            AND LOWER(city_name) IN (
+                'houston',
+                'los_angeles',
+                'new_york'
+            )
+        GROUP BY
+            LOWER(city_name)
         """,
     ),
-    # We use the data provided by Snowflake Public Data to limit our pipeline to US cities with atleast
-    # 100k residents to enjoy all the benefits a big city provides during our vacation.
+
+    # Major US cities (population > 100,000)
     View(
         name="major_us_cities",
         columns=[
@@ -160,27 +207,31 @@ pipeline = [
             ViewColumn(name="total_population"),
         ],
         query="""
-        select 
-            geo.geo_id, 
-            geo.geo_name, 
-            max(ts.value) total_population
-        from SNOWFLAKE_PUBLIC_DATA_FREE.PUBLIC_DATA_FREE.DATACOMMONS_TIMESERIES ts
-        join SNOWFLAKE_PUBLIC_DATA_FREE.PUBLIC_DATA_FREE.GEOGRAPHY_INDEX geo 
-            on ts.geo_id = geo.geo_id
-        join SNOWFLAKE_PUBLIC_DATA_FREE.PUBLIC_DATA_FREE.GEOGRAPHY_RELATIONSHIPS geo_rel 
-            on geo_rel.related_geo_id = geo.geo_id
-        where true
-            and ts.variable_name = 'Total Population, census.gov'
-            and date >= '2020-01-01'
-            and geo.level = 'City'
-            and geo_rel.geo_id = 'country/USA'
-            and value > 100000
-        group by geo.geo_id, geo.geo_name
-        order by total_population desc
+        SELECT
+            geo.geo_id,
+            geo.geo_name,
+            MAX(ts.value) AS total_population
+        FROM
+            SNOWFLAKE_CURATED_DATA_FREE.PUBLIC_DATA_FREE.DATACOMMONS_TIMESERIES ts
+        JOIN
+            SNOWFLAKE_CURATED_DATA_FREE.PUBLIC_DATA_FREE.GEOGRAPHY_INDEX geo
+            ON ts.geo_id = geo.geo_id
+        JOIN
+            SNOWFLAKE_CURATED_DATA_FREE.PUBLIC_DATA_FREE.GEOGRAPHY_RELATIONSHIPS geo_rel
+            ON geo_rel.related_geo_id = geo.geo_id
+        WHERE
+            ts.variable = 'Count_Person_census.gov'
+            AND ts.date >= '2020-01-01'
+            AND geo.level = 'City'
+            AND geo_rel.geo_id = 'country/USA'
+            AND ts.value > 100000
+        GROUP BY
+            geo.geo_id,
+            geo.geo_name
         """,
     ),
-    # Using the geography relationships provided by Snowflake Public Data we collect all the
-    # zip codes belonging to a city.
+
+    # City -> ZIP relationships
     View(
         name="zip_codes_in_city",
         columns=[
@@ -190,21 +241,25 @@ pipeline = [
             ViewColumn(name="zip_geo_name"),
         ],
         query="""
-        select 
-            city.geo_id city_geo_id, 
-            city.geo_name city_geo_name, 
-            city.related_geo_id zip_geo_id, 
-            city.related_geo_name zip_geo_name
-        from SNOWFLAKE_PUBLIC_DATA_FREE.PUBLIC_DATA_FREE.GEOGRAPHY_RELATIONSHIPS country
-        join SNOWFLAKE_PUBLIC_DATA_FREE.PUBLIC_DATA_FREE.GEOGRAPHY_RELATIONSHIPS city 
-            on country.related_geo_id = city.geo_id
-        where true
-            and country.geo_id = 'country/USA'
-            and city.level = 'City'
-            and city.related_level = 'CensusZipCodeTabulationArea'
-        order by city_geo_id
+        SELECT
+            city.geo_id AS city_geo_id,
+            city.geo_name AS city_geo_name,
+            city.related_geo_id AS zip_geo_id,
+            city.related_geo_name AS zip_geo_name
+        FROM
+            SNOWFLAKE_CURATED_DATA_FREE.PUBLIC_DATA_FREE.GEOGRAPHY_RELATIONSHIPS country
+        JOIN
+            SNOWFLAKE_CURATED_DATA_FREE.PUBLIC_DATA_FREE.GEOGRAPHY_RELATIONSHIPS city
+            ON country.related_geo_id = city.geo_id
+        WHERE
+            country.geo_id = 'country/USA'
+            AND city.level = 'City'
+            AND city.related_level =
+                'CensusZipCodeTabulationArea'
         """,
     ),
+
+    # Weather joined with major cities via GEO_ID
     View(
         name="weather_joined_with_major_cities",
         columns=[
@@ -212,36 +267,46 @@ pipeline = [
             ViewColumn(name="geo_name"),
             ViewColumn(name="total_population"),
             ViewColumn(name="avg_temperature_air_f"),
-            ViewColumn(name="avg_relative_humidity_pct"),
-            ViewColumn(name="avg_cloud_cover_pct"),
-            ViewColumn(name="precipitation_probability_pct"),
+            ViewColumn(name="total_precipitation_in"),
         ],
         query="""
-        select 
-            city.geo_id, 
-            city.geo_name, 
+        SELECT
+            city.geo_id,
+            city.geo_name,
             city.total_population,
-            avg(avg_temperature_air_f) avg_temperature_air_f,
-            avg(avg_relative_humidity_pct) avg_relative_humidity_pct,
-            avg(avg_cloud_cover_pct) avg_cloud_cover_pct,
-            avg(precipitation_probability_pct) precipitation_probability_pct
-        from major_us_cities city
-        join zip_codes_in_city zip on city.geo_id = zip.city_geo_id
-        join weather_forecast weather on zip.zip_geo_name = weather.postal_code
-        group by city.geo_id, city.geo_name, city.total_population
+            weather.avg_temperature_air_f,
+            weather.total_precipitation_in
+        FROM
+            QUICKSTART_PROD.SILVER.MAJOR_US_CITIES city
+        JOIN
+            QUICKSTART_PROD.SILVER.WEATHER_FORECAST weather
+            ON city.geo_id = weather.geo_id
         """,
     ),
-    # Placeholder: Add new view definition here
 ]
 
 
-# entry point for PythonAPI
-root = Root(Session.builder.getOrCreate())
+# ---------------------------------------------------------
+# 3. Snowflake Python API entry point
+# ---------------------------------------------------------
 
-# create views in Snowflake
-silver_schema = root.databases["quickstart_prod"].schemas["silver"]
-silver_schema.user_defined_functions.create(
-    map_city_to_airport, mode=CreateMode.or_replace
+session = Session.builder.getOrCreate()
+root = Root(session)
+
+silver_schema = (
+    root.databases["QUICKSTART_PROD"]
+        .schemas["SILVER"]
 )
+
+silver_schema.user_defined_functions.create(
+    map_city_to_airport,
+    mode=CreateMode.or_replace,
+)
+
 for view in pipeline:
-    silver_schema.views.create(view, mode=CreateMode.or_replace)
+    silver_schema.views.create(
+        view,
+        mode=CreateMode.or_replace,
+    )
+
+print("Snowflake harmonization objects created.")
