@@ -53,6 +53,20 @@ jobs:
           openssl pkcs8 -in .snowflake/snowflake_rsa_key -inform PEM -nocrypt -out /dev/null
           echo "GitHub Actions private key validation successful"
 
+      - name: Configure Snowflake CLI connection
+        run: |
+          mkdir -p "$SNOWFLAKE_HOME"
+          cat > "$SNOWFLAKE_HOME/config.toml" <<'EOF'
+          default_connection_name = "default"
+
+          [connections.default]
+          authenticator = "SNOWFLAKE_JWT"
+          EOF
+          chmod 600 "$SNOWFLAKE_HOME/config.toml"
+
+      - name: Test Snowflake CLI connection
+        run: snow connection test -c default
+
       - name: Fetch repository changes
         run: snow git fetch "${REPO_NAME}"
 
