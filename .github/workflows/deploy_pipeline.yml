@@ -65,19 +65,21 @@ jobs:
         run: |
           BRANCH_NAME=${{ github.ref_name }}
           if [ "${BRANCH_NAME}" == "main" ]; then
+            ENVIRONMENT=PROD
             RETENTION_TIME=1
           else
+            ENVIRONMENT=DEV
             RETENTION_TIME=0
           fi
           snow git execute \
             "@${REPO_NAME}/branches/${BRANCH_NAME}/steps/01_deploy_environment.sql" \
-            -D "environment='${BRANCH_NAME}'"
+            -D "environment='${ENVIRONMENT}'"
 
           snow git execute \
             "@${REPO_NAME}/branches/${BRANCH_NAME}/steps/03_harmonize_data.py" \
-            -D "ENVIRONMENT=${BRANCH_NAME}"
+            -D "ENVIRONMENT=${ENVIRONMENT}"
 
           snow git execute \
             "@${REPO_NAME}/branches/${BRANCH_NAME}/steps/04_orchestrate_jobs.sql" \
-            -D "environment='${BRANCH_NAME}'" \
+            -D "environment='${ENVIRONMENT}'" \
             -D "retention_time=${RETENTION_TIME}"
