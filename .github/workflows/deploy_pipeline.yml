@@ -44,6 +44,9 @@ jobs:
           snow --version
 
       # Update Snowflake's copy of the repository
+      - name: Secure Snowflake configuration
+        run: chmod 600 .snowflake/config.toml
+
       - name: Fetch repository changes
         run: snow git fetch "${REPO_NAME}"
 
