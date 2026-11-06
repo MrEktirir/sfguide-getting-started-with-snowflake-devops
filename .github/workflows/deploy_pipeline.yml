@@ -34,10 +34,10 @@ jobs:
 
       # Install Snowflake CLI GitHub Action and point to config file
       - name: Install snowflake-cli
-        uses: Snowflake-Labs/snowflake-cli-action@v1.5
-        with:
-          cli-version: "latest"
-          default-config-file-path: ".snowflake/config.toml"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install snowflake-cli==3.30.0
+          snow --version
 
       # Update Snowflake's copy of the repository
       - name: Fetch repository changes
