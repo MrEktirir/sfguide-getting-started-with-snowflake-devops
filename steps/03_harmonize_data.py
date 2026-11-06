@@ -295,7 +295,7 @@ root = Root(session)
 
 import os
 
-environment = os.environ["environment"].upper()
+environment = os.environ["ENVIRONMENT"].upper()
 
 if environment not in ("DEV", "PROD"):
     raise ValueError("environment must be DEV or PROD")

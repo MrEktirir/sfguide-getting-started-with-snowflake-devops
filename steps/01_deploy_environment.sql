@@ -1,0 +1,21 @@
+USE ROLE ACCOUNTADMIN;
+USE WAREHOUSE QUICKSTART_WH;
+
+-- Create or update the target environment
+CREATE DATABASE IF NOT EXISTS QUICKSTART_{{environment}};
+
+CREATE SCHEMA IF NOT EXISTS QUICKSTART_{{environment}}.BRONZE;
+CREATE SCHEMA IF NOT EXISTS QUICKSTART_{{environment}}.SILVER;
+CREATE SCHEMA IF NOT EXISTS QUICKSTART_{{environment}}.GOLD;
+
+-- Prepare the Bronze layer
+CREATE FILE FORMAT IF NOT EXISTS QUICKSTART_{{environment}}.BRONZE.JSON_FORMAT
+    TYPE = JSON;
+
+CREATE STAGE IF NOT EXISTS QUICKSTART_{{environment}}.BRONZE.RAW
+    FILE_FORMAT = QUICKSTART_{{environment}}.BRONZE.JSON_FORMAT;
+
+-- Copy source data into the target environment
+COPY FILES INTO @QUICKSTART_{{environment}}.BRONZE.RAW
+FROM @QUICKSTART_COMMON.PUBLIC.QUICKSTART_REPO/branches/main/data/
+FILES = ('airport_list.json');
