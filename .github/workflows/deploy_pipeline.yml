@@ -16,6 +16,7 @@ jobs:
 
     env:
       REPO_NAME: "quickstart_common.public.quickstart_repo"
+      SNOWFLAKE_HOME: "${{ github.workspace }}/.snowflake"
       SNOWFLAKE_DEFAULT_CONNECTION_NAME: "default"
       SNOWFLAKE_CONNECTIONS_DEFAULT_AUTHENTICATOR: "SNOWFLAKE_JWT"
       SNOWFLAKE_CONNECTIONS_DEFAULT_WAREHOUSE: "QUICKSTART_WH"
