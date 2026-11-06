@@ -52,6 +52,11 @@ jobs:
       - name: Secure Snowflake configuration
         run: chmod 600 .snowflake/config.toml
 
+      - name: Validate private key
+        run: |
+          openssl pkcs8 -in .snowflake/snowflake_rsa_key -inform PEM -nocrypt -out /dev/null
+          echo "GitHub Actions private key validation successful"
+
       - name: Fetch repository changes
         run: snow git fetch "${REPO_NAME}"
 
