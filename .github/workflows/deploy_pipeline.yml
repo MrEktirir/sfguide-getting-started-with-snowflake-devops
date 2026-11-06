@@ -61,6 +61,8 @@ jobs:
 
           [connections.default]
           authenticator = "SNOWFLAKE_JWT"
+          database = "QUICKSTART_COMMON"
+          schema = "PUBLIC"
           EOF
           chmod 600 "$SNOWFLAKE_HOME/config.toml"
 
