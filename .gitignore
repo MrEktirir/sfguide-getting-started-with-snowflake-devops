@@ -1,1 +1,6 @@
 .snowflake/logs
+
+# Snowflake CLI local configuration and temporary files
+.snowflake/config.toml
+.snowflake/.cli_version.cache
+.snowflake/last_cli_error.json
