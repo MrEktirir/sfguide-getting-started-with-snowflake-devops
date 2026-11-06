@@ -293,8 +293,15 @@ pipeline = [
 session = Session.builder.getOrCreate()
 root = Root(session)
 
+import os
+
+environment = os.environ["ENVIRONMENT"].upper()
+
+if environment not in ("DEV", "PROD"):
+    raise ValueError("environment must be DEV or PROD")
+
 silver_schema = (
-    root.databases["QUICKSTART_PROD"]
+    root.databases[f"QUICKSTART_{environment}"]
         .schemas["SILVER"]
 )
 

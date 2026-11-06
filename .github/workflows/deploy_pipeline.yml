@@ -16,7 +16,11 @@ jobs:
 
     env:
       REPO_NAME: "quickstart_common.public.quickstart_repo"
+      SNOWFLAKE_HOME: "${{ github.workspace }}/.snowflake"
+      SNOWFLAKE_DEFAULT_CONNECTION_NAME: "default"
       SNOWFLAKE_CONNECTIONS_DEFAULT_AUTHENTICATOR: "SNOWFLAKE_JWT"
+      SNOWFLAKE_CONNECTIONS_DEFAULT_WAREHOUSE: "QUICKSTART_WH"
+      SNOWFLAKE_CONNECTIONS_DEFAULT_ROLE: "ACCOUNTADMIN"
       SNOWFLAKE_CONNECTIONS_DEFAULT_PRIVATE_KEY_FILE: ".snowflake/snowflake_rsa_key"
       # Read connection secrets
       SNOWFLAKE_CONNECTIONS_DEFAULT_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
@@ -29,17 +33,30 @@ jobs:
 
       # Write private key secret as file
       - name: Configure Private Key
+        env:
+          PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
         run: |
-          echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > .snowflake/snowflake_rsa_key
+          mkdir -p .snowflake
+          printf '%s\n' "$PRIVATE_KEY" > .snowflake/snowflake_rsa_key
+          chmod 600 .snowflake/snowflake_rsa_key
 
       # Install Snowflake CLI GitHub Action and point to config file
       - name: Install snowflake-cli
-        uses: Snowflake-Labs/snowflake-cli-action@v1.5
-        with:
-          cli-version: "latest"
-          default-config-file-path: ".snowflake/config.toml"
+        run: |
+          python3 -m venv /tmp/snowflake-cli-venv
+          /tmp/snowflake-cli-venv/bin/python -m pip install --disable-pip-version-check snowflake-cli==3.30.0
+          echo "/tmp/snowflake-cli-venv/bin" >> "$GITHUB_PATH"
+          /tmp/snowflake-cli-venv/bin/snow --version
 
       # Update Snowflake's copy of the repository
+      - name: Secure Snowflake configuration
+        run: chmod 600 .snowflake/config.toml
+
+      - name: Validate private key
+        run: |
+          openssl pkcs8 -in .snowflake/snowflake_rsa_key -inform PEM -nocrypt -out /dev/null
+          echo "GitHub Actions private key validation successful"
+
       - name: Fetch repository changes
         run: snow git fetch "${REPO_NAME}"
 
@@ -58,7 +75,7 @@ jobs:
 
           snow git execute \
             "@${REPO_NAME}/branches/${BRANCH_NAME}/steps/03_harmonize_data.py" \
-            -D "environment='${BRANCH_NAME}'"
+            -D "ENVIRONMENT=${BRANCH_NAME}"
 
           snow git execute \
             "@${REPO_NAME}/branches/${BRANCH_NAME}/steps/04_orchestrate_jobs.sql" \
